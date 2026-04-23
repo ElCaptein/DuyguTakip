@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Smart Camera - Fix</title>
+    <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
+    <style>
+        :root { --neon: #00ffcc; --danger: #ff4444; }
+        body { font-family: 'Segoe UI', sans-serif; background: #0f0f0f; color: white; margin: 0; display: flex; flex-direction: column; align-items: center; }
+        .app-container { width: 100%; max-width: 640px; padding: 20px; }
+        #view-stack { position: relative; width: 100%; aspect-ratio: 4/3; background: #000; border-radius: 12px; overflow: hidden; border: 2px solid #333; }
+        video, canvas { position: absolute; width: 100%; height: 100%; object-fit: cover; }
+        .ui-panel { background: rgba(255,255,255,0.05); padding: 15px; border-radius: 12px; margin-bottom: 15px; text-align: center; }
+        #command { font-size: 1.8rem; font-weight: bold; color: var(--neon); margin: 10px 0; }
+        .controls { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; justify-content: center; }
+        select { background: #222; color: white; padding: 8px; border-radius: 5px; border: 1px solid #444; width: 100%; }
+        #log { font-size: 10px; color: #888; margin-top: 10px; text-align: left; background: #000; padding: 5px; border-radius: 4px; max-height: 60px; overflow-y: auto; }
+    </style>
+</head>
+<body>
+
+    <div class="app-container">
+        <div class="ui-panel">
+            <div id="status">Sistem Başlatılıyor...</div>
+            <div id="command">HAZIRLANIYOR</div>
+            <div id="emotion">Duygu: -</div>
+            <div class="controls">
+                <select id="cameraSelect"><option>Kamera Bekleniyor...</option></select>
+            </div>
+        </div>
+
+        <div id="view-stack">
+            <video id="video" autoplay muted playsinline></video>
+            <canvas id="overlay"></canvas>
+        </div>
+        
+        <div id="log">Sistem kayıtları burada görünecek...</div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('overlay');
+        const cameraSelect = document.getElementById('cameraSelect');
+        const commandEl = document.getElementById('command');
+        const statusEl = document.getElementById('status');
+        const logEl = document.getElementById('log');
+
+        function addLog(msg) {
+            logEl.innerHTML += `<div>> ${msg}</div>`;
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        async function init() {
+            try {
+                addLog("Modeller yükleniyor...");
+                const MODEL_URL = 'https://raw.githubusercontent.com/vladmandic/face-api/master/model/';
+                
+                await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+                await faceapi.nets.faceExpressionNet.loadFromUri(MODEL_URL);
+                
+                addLog("Modeller hazır.");
+                statusEl.innerText = "Donanım: " + faceapi.tf.getBackend().toUpperCase();
+                
+                setupCameras();
+            } catch (err) {
+                addLog("HATA: " + err.message);
+                statusEl.innerText = "Yükleme Hatası!";
+            }
+        }
+
+        async function setupCameras() {
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const videoDevices = devices.filter(d => d.kind === 'videoinput');
+                
+                cameraSelect.innerHTML = videoDevices.map(d => 
+                    `<option value="${d.deviceId}">${d.label || 'Kamera ' + d.deviceId.slice(0,5)}</option>`
+                ).join('');
+
+                if (videoDevices.length > 0) {
+                    startCamera(videoDevices[0].deviceId);
+                } else {
+                    addLog("Kamera bulunamadı.");
+                }
+            } catch (err) {
+                addLog("Kamera erişim hatası: " + err.message);
+            }
+        }
+
+        async function startCamera(deviceId) {
+            if (window.stream) {
+                window.stream.getTracks().forEach(track => track.stop());
+            }
+            
+            const constraints = {
+                video: { deviceId: { exact: deviceId } }
+            };
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                window.stream = stream;
+                video.srcObject = stream;
+                addLog("Kamera akışı başlatıldı.");
+            } catch (err) {
+                addLog("Stream hatası: " + err.message);
+            }
+        }
+
+        video.addEventListener('play', () => {
+            const displaySize = { width: video.offsetWidth, height: video.offsetHeight };
+            faceapi.matchDimensions(canvas, displaySize);
+
+            setInterval(async () => {
+                const detections = await faceapi.detectAllFaces(video, 
+                    new faceapi.TinyFaceDetectorOptions({ inputSize: 160 }))
+                    .withFaceExpressions();
+
+                const resized = faceapi.resizeResults(detections, displaySize);
+                const ctx = canvas.getContext('2d');
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                
+                faceapi.draw.drawDetections(canvas, resized);
+
+                if (detections.length > 0) {
+                    const box = detections[0].detection.box;
+                    const centerX = box.x + (box.width / 2);
+                    const viewCenter = video.offsetWidth / 2;
+                    
+                    // Komut Mantığı
+                    let cmd = "HEDEFDESİNİZ";
+                    if (centerX < viewCenter - 50) cmd = "SAĞA KAYIN";
+                    else if (centerX > viewCenter + 50) cmd = "SOLA KAYIN";
+                    else if (box.width < 130) cmd = "YAKINLAŞIN";
+                    else if (box.width > 280) cmd = "UZAKLAŞIN";
+
+                    commandEl.innerText = cmd;
+                    commandEl.style.color = cmd === "HEDEFDESİNİZ" ? "#00ffcc" : "#ff4444";
+                    
+                    const expr = detections[0].expressions;
+                    const best = Object.keys(expr).reduce((a, b) => expr[a] > expr[b] ? a : b);
+                    document.getElementById('emotion').innerText = `Duygu: ${best.toUpperCase()}`;
+                } else {
+                    commandEl.innerText = "YÜZ ARANIYOR";
+                }
+            }, 150);
+        });
+
+        cameraSelect.onchange = () => startCamera(cameraSelect.value);
+        
+        // Başlat
+        init();
+    </script>
+</body>
+</html>
