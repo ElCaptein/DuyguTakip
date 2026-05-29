@@ -3,30 +3,34 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Smart Camera - Fix</title>
-    <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
+    <title>AI Smart Camera - TF Lite / MediaPipe</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/vision_bundle.js" crossorigin="anonymous"></script>
     <style>
-        :root { --neon: #00ffcc; --danger: #ff4444; }
+        :root { --neon: #00ffcc; --danger: #ff4444; --warning: #ffb703; }
         body { font-family: 'Segoe UI', sans-serif; background: #0f0f0f; color: white; margin: 0; display: flex; flex-direction: column; align-items: center; }
-        .app-container { width: 100%; max-width: 640px; padding: 20px; }
+        .app-container { width: 100%; max-width: 640px; padding: 20px; box-sizing: border-box; }
         #view-stack { position: relative; width: 100%; aspect-ratio: 4/3; background: #000; border-radius: 12px; overflow: hidden; border: 2px solid #333; }
         video, canvas { position: absolute; width: 100%; height: 100%; object-fit: cover; }
         .ui-panel { background: rgba(255,255,255,0.05); padding: 15px; border-radius: 12px; margin-bottom: 15px; text-align: center; }
         #command { font-size: 1.8rem; font-weight: bold; color: var(--neon); margin: 10px 0; }
         .controls { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; justify-content: center; }
-        select { background: #222; color: white; padding: 8px; border-radius: 5px; border: 1px solid #444; width: 100%; }
-        #log { font-size: 10px; color: #888; margin-top: 10px; text-align: left; background: #000; padding: 5px; border-radius: 4px; max-height: 60px; overflow-y: auto; }
+        select { background: #222; color: white; padding: 10px; border-radius: 5px; border: 1px solid #444; width: 100%; font-size: 14px; }
+        #log { font-size: 11px; color: #aaa; margin-top: 10px; text-align: left; background: #000; padding: 8px; border-radius: 4px; max-height: 80px; overflow-y: auto; font-family: monospace; }
+        .metrics { display: flex; justify-content: space-around; margin-top: 5px; font-size: 0.9rem; color: #ccc; }
     </style>
 </head>
 <body>
 
     <div class="app-container">
         <div class="ui-panel">
-            <div id="status">Sistem Başlatılıyor...</div>
-            <div id="command">HAZIRLANIYOR</div>
-            <div id="emotion">Duygu: -</div>
+            <div id="status">TF Lite Sistemi Başlatılıyor...</div>
+            <div id="command">MODEL YÜKLENİYOR</div>
+            <div class="metrics">
+                <span id="emotion">Duygu: -</span>
+                <span id="attention">Odak: -</span>
+            </div>
             <div class="controls">
-                <select id="cameraSelect"><option>Kamera Bekleniyor...</option></select>
+                <select id="cameraSelect"><option>Kamera aranıyor...</option></select>
             </div>
         </div>
 
@@ -35,7 +39,7 @@
             <canvas id="overlay"></canvas>
         </div>
         
-        <div id="log">Sistem kayıtları burada görünecek...</div>
+        <div id="log">Sistem başlatılıyor...</div>
     </div>
 
     <script>
@@ -45,22 +49,40 @@
         const commandEl = document.getElementById('command');
         const statusEl = document.getElementById('status');
         const logEl = document.getElementById('log');
+        const emotionEl = document.getElementById('emotion');
+        const attentionEl = document.getElementById('attention');
+
+        let faceLandmarker;
+        let runningMode = "VIDEO";
+        let lastVideoTime = -1;
 
         function addLog(msg) {
             logEl.innerHTML += `<div>> ${msg}</div>`;
             logEl.scrollTop = logEl.scrollHeight;
         }
 
+        // 1. TF Lite Tabanlı MediaPipe Modelini Yükleme
         async function init() {
             try {
-                addLog("Modeller yükleniyor...");
-                const MODEL_URL = 'https://raw.githubusercontent.com/vladmandic/face-api/master/model/';
+                addLog("TF Lite WebAssembly altyapısı kuruluyor...");
+                const vision = await vision.FilesetResolver.forVisionTasks(
+                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/wasm"
+                );
                 
-                await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
-                await faceapi.nets.faceExpressionNet.loadFromUri(MODEL_URL);
-                
-                addLog("Modeller hazır.");
-                statusEl.innerText = "Donanım: " + faceapi.tf.getBackend().toUpperCase();
+                addLog("Face Landmarker TF Lite modeli indiriliyor (Göz/Ağız Takibi)...");
+                faceLandmarker = await vision.FaceLandmarker.createFromOptions(vision, {
+                    baseOptions: {
+                        modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker_with_blendshapes/float16/1/face_landmarker_with_blendshapes.task`,
+                        delegate: "GPU" // Donanım ivmesi zorlaması
+                    },
+                    outputFaceBlendshapes: true, // Duygu ve mimik analizi için kritik veri kümesi
+                    runningMode: runningMode,
+                    numFaces: 1
+                });
+
+                addLog("TF Lite Modeli Başarıyla Yüklendi.");
+                statusEl.innerText = "Donanım: TF Lite WASM + GPU İvmesi";
+                commandEl.innerText = "YÜZ ARANIYOR";
                 
                 setupCameras();
             } catch (err) {
@@ -69,8 +91,11 @@
             }
         }
 
+        // 2. Kamera Cihazlarını Listeleme
         async function setupCameras() {
             try {
+                // Önce izin iste
+                await navigator.mediaDevices.getUserMedia({ video: true });
                 const devices = await navigator.mediaDevices.enumerateDevices();
                 const videoDevices = devices.filter(d => d.kind === 'videoinput');
                 
@@ -88,63 +113,128 @@
             }
         }
 
+        // 3. Kamera Akışını Başlatma
         async function startCamera(deviceId) {
             if (window.stream) {
                 window.stream.getTracks().forEach(track => track.stop());
             }
             
             const constraints = {
-                video: { deviceId: { exact: deviceId } }
+                video: { 
+                    deviceId: deviceId ? { exact: deviceId } : undefined,
+                    width: { ideal: 640 },
+                    height: { ideal: 480 }
+                }
             };
 
             try {
                 const stream = await navigator.mediaDevices.getUserMedia(constraints);
                 window.stream = stream;
                 video.srcObject = stream;
-                addLog("Kamera akışı başlatıldı.");
+                video.addEventListener('loadeddata', predictWebcam);
+                addLog("Kamera akışı aktif.");
             } catch (err) {
                 addLog("Stream hatası: " + err.message);
             }
         }
 
-        video.addEventListener('play', () => {
-            const displaySize = { width: video.offsetWidth, height: video.offsetHeight };
-            faceapi.matchDimensions(canvas, displaySize);
+        // 4. TF Lite Model Tahmin Döngüsü (Real-time / RequestAnimationFrame)
+        async function predictWebcam() {
+            const ctx = canvas.getContext('2d');
+            
+            // Boyut eşitleme
+            if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+            }
 
-            setInterval(async () => {
-                const detections = await faceapi.detectAllFaces(video, 
-                    new faceapi.TinyFaceDetectorOptions({ inputSize: 160 }))
-                    .withFaceExpressions();
-
-                const resized = faceapi.resizeResults(detections, displaySize);
-                const ctx = canvas.getContext('2d');
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (lastVideoTime !== video.currentTime) {
+                lastVideoTime = video.currentTime;
+                const startTimeMs = performance.now();
                 
-                faceapi.draw.drawDetections(canvas, resized);
+                // TF Lite Modeli ile yüz analizi
+                const results = faceLandmarker.detectForVideo(video, startTimeMs);
+                
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-                if (detections.length > 0) {
-                    const box = detections[0].detection.box;
-                    const centerX = box.x + (box.width / 2);
-                    const viewCenter = video.offsetWidth / 2;
+                if (results.faceLandmarks && results.faceLandmarks.length > 0) {
+                    const landmarks = results.faceLandmarks[0];
                     
-                    // Komut Mantığı
+                    // --- İşlevsel Yüz Çerçevesi (Bounding Box) Hesaplama ---
+                    let minX = canvas.width, maxX = 0, minY = canvas.height, maxY = 0;
+                    landmarks.forEach(pt => {
+                        const px = pt.x * canvas.width;
+                        const py = pt.y * canvas.height;
+                        if (px < minX) minX = px; if (px > maxX) maxX = px;
+                        if (py < minY) minY = py; if (py > maxY) maxY = py;
+                    });
+                    const boxWidth = maxX - minX;
+                    const centerX = minX + (boxWidth / 2);
+                    const viewCenter = canvas.width / 2;
+
+                    // Siber Tasarım Kutu Çizimi
+                    ctx.strokeStyle = '#00ffcc';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(minX, minY, boxWidth, maxY - minY);
+
+                    // --- Akıllı Komut Mantığı ---
                     let cmd = "HEDEFDESİNİZ";
-                    if (centerX < viewCenter - 50) cmd = "SAĞA KAYIN";
-                    else if (centerX > viewCenter + 50) cmd = "SOLA KAYIN";
-                    else if (box.width < 130) cmd = "YAKINLAŞIN";
-                    else if (box.width > 280) cmd = "UZAKLAŞIN";
+                    if (centerX < viewCenter - 60) cmd = "SAĞA KAYIN";
+                    else if (centerX > viewCenter + 60) cmd = "SOLA KAYIN";
+                    else if (boxWidth < 140) cmd = "YAKINLAŞIN";
+                    else if (boxWidth > 320) cmd = "UZAKLAŞIN";
 
                     commandEl.innerText = cmd;
-                    commandEl.style.color = cmd === "HEDEFDESİNİZ" ? "#00ffcc" : "#ff4444";
-                    
-                    const expr = detections[0].expressions;
-                    const best = Object.keys(expr).reduce((a, b) => expr[a] > expr[b] ? a : b);
-                    document.getElementById('emotion').innerText = `Duygu: ${best.toUpperCase()}`;
+                    commandEl.style.color = cmd === "HEDEFDESİNİZ" ? "var(--neon)" : "var(--danger)";
+
+                    // --- Gelişmiş Duygu ve İşlevsellik Mantığı (Blendshapes / Mimik Algılama) ---
+                    if (results.faceBlendshapes && results.faceBlendshapes.length > 0) {
+                        const shapes = results.faceBlendshapes[0].categories;
+                        
+                        // Obje haritasına dönüştür (Daha rahat okumak için)
+                        const shapeMap = {};
+                        shapes.forEach(s => shapeMap[s.categoryName] = s.score);
+
+                        // Duygu Durum Kuralları
+                        let emotion = "NÖTR";
+                        if (shapeMap['jawOpen'] > 0.3 && shapeMap['mouthSmileLeft'] > 0.4) emotion = "MUTLU / ŞAŞIRMIŞ";
+                        else if (shapeMap['mouthSmileLeft'] > 0.3 || shapeMap['mouthSmileRight'] > 0.3) emotion = "MUTLU 😊";
+                        else if (shapeMap['browDownLeft'] > 0.4 || shapeMap['browDownRight'] > 0.4) emotion = "KIZGIN / ODAKLANMIŞ 😠";
+                        else if (shapeMap['mouthFrownLeft'] > 0.3 || shapeMap['mouthFrownRight'] > 0.3) emotion = "ÜZGÜN 😢";
+
+                        emotionEl.innerText = `Duygu: ${emotion}`;
+
+                        // İşlevsel Ek Özellik: Dikkat / Göz Kırpma / Uyku Analizi
+                        const eyeBlinkLeft = shapeMap['eyeBlinkLeft'];
+                        const eyeBlinkRight = shapeMap['eyeBlinkRight'];
+                        
+                        if (eyeBlinkLeft > 0.6 && eyeBlinkRight > 0.6) {
+                            attentionEl.innerText = "Odak: GÖZLER KAPALI 😴";
+                            attentionEl.style.color = "var(--danger)";
+                        } else {
+                            // Basit kafa dönüş (Yaw) tahmini - Göz köşelerinden çıkarım
+                            const eyeLookInLeft = shapeMap['eyeLookInLeft'];
+                            const eyeLookOutLeft = shapeMap['eyeLookOutLeft'];
+                            if (Math.abs(eyeLookInLeft - eyeLookOutLeft) > 0.3) {
+                                attentionEl.innerText = "Odak: DIŞARIYA BAKIYOR ⚠️";
+                                attentionEl.style.color = "var(--warning)";
+                            } else {
+                                attentionEl.innerText = "Odak: KAMERADA ✅";
+                                attentionEl.style.color = "var(--neon)";
+                            }
+                        }
+                    }
                 } else {
                     commandEl.innerText = "YÜZ ARANIYOR";
+                    commandEl.style.color = "white";
+                    emotionEl.innerText = "Duygu: -";
+                    attentionEl.innerText = "Odak: -";
                 }
-            }, 150);
-        });
+            }
+
+            // Döngüyü tarayıcı hızında akıcı devam ettir (setInterval yerine çok daha performanslıdır)
+            requestAnimationFrame(predictWebcam);
+        }
 
         cameraSelect.onchange = () => startCamera(cameraSelect.value);
         
